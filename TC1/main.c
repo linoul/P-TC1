@@ -14,6 +14,7 @@
 #include "timed_task/timed_task.h"
 #include "mqtt_server/user_mqtt_client.h"
 #include "telnet_server/user_telnet.h"
+#include "homekit_demo.h"
 
 char rtc_init = 0; //sntp校时成功标志位
 uint32_t total_time = 0;
@@ -475,6 +476,13 @@ int application_start(void) {
     PowerInit();
     AppHttpdStart(); // start http server thread
     UserTelnetStart(); // start telnet console thread (独立于 httpd/MQTT 的本地救砖通道)
+
+    /* HomeKit demo: 等 WiFi 连上后启动 HAP 服务（homekit_demo.c） */
+    err = mico_rtos_create_thread(NULL, MICO_APPLICATION_PRIORITY, "homekit",
+                                  (mico_thread_function_t) homekit_boot_thread,
+                                  0x800, 0);
+    require_noerr_string(err, exit, "ERROR: Unable to start the homekit thread.");
+
     HttpdWatchdogStart(); // web 卡死自愈(单连接串行 httpd 被阻塞对端卡住时自动重启)
 
     UserLedSet(user_config->power_led_enabled);

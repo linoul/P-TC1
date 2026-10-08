@@ -7,30 +7,37 @@
  * 本示例暴露一个"开关(Switch)"配件，含 1 个 On 特性。读/写走全局回调，
  * 库按名字调用这 4 个函数（见 HomeKit.h + .a 导出符号），必须由本文件实现。
  *
- * 未实测声明：本文件未在真机/工具链上编译运行（本机无 MiCO 交叉工具链）。
- * 代码严格依据 HomeKit.h 数据结构与 .a 导出符号编写；其中 HKSendNotifyMessage
- * 的签名是依据导出符号名推断的，若编译报隐式声明或运行异常，把对应调用注释掉即可
- * （读路径仍能反映状态，只是 iOS 端不会自动刷新）。
+ * HAP type 字符串使用 MiCO 的反向 DNS 标识，例如
+ *   "public.hap.service.switch" 、 "public.hap.characteristic.on"
+ * （格式已对照 MICO 官方 HomekitProfiles.c 示例确认）。
+ *
+ * 未实测声明（无真机/工具链验证）：
+ *  - mfi_cp_port = MICO_I2C_NONE：TC1 A1 无 MFi 芯片，依赖库的软件回退；
+ *    若闭源 .a 在无芯片时硬失败，hk_server_start() 运行期会报错。
+ *  - 回调里的 (accessoryID/serviceID/characteristicID) 索引：按 MiCO HomekitProfiles
+ *    示例推测为 0 基，若库实际按 1 基编号，需把下方常量整体 +1（已在注释标出）。
+ *  - key_storage 为 RAM 版：重启后配对丢失，需重新配对。
  * ---------------------------------------------------------------------------
  */
+#include "mico.h"
 #include "HomeKit.h"
+#include "user_wifi.h"
 #include <string.h>
 
-/* ============================ HAP 短 UUID ============================ */
-/* 基 UUID: 00000000-0000-1000-8000-0026BB765291，下面用短形式 */
-#define TYPE_ACCESSORY_INFO  "3E"   /* Accessory Information 服务 */
-#define TYPE_SWITCH          "49"   /* Switch 服务 */
-#define TYPE_IDENTIFY        "14"   /* Identify 特性（写） */
-#define TYPE_MANUFACTURER    "20"
-#define TYPE_MODEL           "21"
-#define TYPE_NAME            "23"
-#define TYPE_SERIAL          "30"
-#define TYPE_FW_REV          "52"
-#define TYPE_ON              "25"   /* On 特性（bool） */
+/* ============================ HAP 类型字符串（MiCO 反向 DNS 风格） ============================ */
+#define TYPE_ACCESSORY_INFO  "public.hap.service.accessory-information"
+#define TYPE_SWITCH          "public.hap.service.switch"
+#define TYPE_IDENTIFY        "public.hap.characteristic.identify"
+#define TYPE_MANUFACTURER    "public.hap.characteristic.manufacturer"
+#define TYPE_MODEL           "public.hap.characteristic.model"
+#define TYPE_NAME            "public.hap.characteristic.name"
+#define TYPE_SERIAL          "public.hap.characteristic.serial-number"
+#define TYPE_FW_REV          "public.hap.characteristic.firmware-revision"
+#define TYPE_ON              "public.hap.characteristic.on"
 
-/* ============================ ID 约定 ================================= */
-/* 这些 ID 就是回调里 (accessoryID, serviceID, characteristicID) 的索引，
-   必须和下面数组的下标严格对应。 */
+/* ============================ ID 约定 =================================
+ * 这些 ID 就是回调里 (accessoryID, serviceID, characteristicID) 的索引，
+ * 必须和下面数组的下标严格对应。若库实际按 1 基编号，把本段常量整体 +1 即可。 */
 #define ACC_0           0
   #define SVC_INFO      0
     #define CHR_IDENTIFY 0
@@ -45,7 +52,7 @@
 /* ============================ 运行态 ================================= */
 static bool g_switch_on = false;   /* demo 状态（真机应换成继电器 GPIO 读取） */
 
-/* ====================== 配件属性树（attribute DB） ====================== */
+/* ====================== 特性数组（具名静态，靠指针引用） ====================== */
 static struct _hapCharacteristic_t info_chr[] = {
   [CHR_IDENTIFY] = { .type = TYPE_IDENTIFY,    .hasStaticValue = true, .valueType = ValueType_bool,   .value.boolValue = false, .secureWrite = true },
   [CHR_MANUF]    = { .type = TYPE_MANUFACTURER,.hasStaticValue = true, .valueType = ValueType_string, .value.stringValue = "Prestar",    .secureRead = true },
@@ -55,12 +62,6 @@ static struct _hapCharacteristic_t info_chr[] = {
   [CHR_FWREV]    = { .type = TYPE_FW_REV,      .hasStaticValue = true, .valueType = ValueType_string, .value.stringValue = "1.0",        .secureRead = true },
 };
 
-static struct _hapService_t info_svc = {
-  .type = TYPE_ACCESSORY_INFO,
-  .num_of_characteristics = sizeof(info_chr) / sizeof(info_chr[0]),
-  .characteristic = info_chr,
-};
-
 /* On 特性：hasStaticValue=false -> 每次读都走 HKReadCharacteristicValue 拿实时值；
    hasEvents=true -> 写后向已订阅的控制器推事件。 */
 static struct _hapCharacteristic_t switch_chr[] = {
@@ -68,15 +69,25 @@ static struct _hapCharacteristic_t switch_chr[] = {
                .secureRead = true, .secureWrite = true, .hasEvents = true },
 };
 
-static struct _hapService_t switch_svc = {
-  .type = TYPE_SWITCH,
-  .num_of_characteristics = sizeof(switch_chr) / sizeof(switch_chr[0]),
-  .characteristic = switch_chr,
+/* 服务数组：以内联初始化器定义（元素均为常量表达式——字符串字面量 / 整型 /
+ * 指向静态特性数组的指针），再由 acc0.services 以指针引用，规避
+ * "initializer element is not constant"。 */
+static struct _hapService_t g_services[] = {
+  {
+    .type = TYPE_ACCESSORY_INFO,
+    .num_of_characteristics = sizeof(info_chr) / sizeof(info_chr[0]),
+    .characteristic = info_chr,
+  },
+  {
+    .type = TYPE_SWITCH,
+    .num_of_characteristics = sizeof(switch_chr) / sizeof(switch_chr[0]),
+    .characteristic = switch_chr,
+  },
 };
 
 static struct _hapAccessory_t acc0 = {
-  .num_of_services = 2,
-  .services = (struct _hapService_t[]){ info_svc, switch_svc },
+  .num_of_services = sizeof(g_services) / sizeof(g_services[0]),
+  .services = g_services,
 };
 
 static hapProduct_t g_product = {
@@ -134,13 +145,10 @@ void HKWriteCharacteristicValue(int accessoryID, int serviceID, int characterist
 
   if (serviceID == SVC_SWITCH && characteristicID == CHR_ON) {
     g_switch_on = value.boolValue;            /* 真机：翻转对应继电器 GPIO */
-    /* moreComing==false 时表示本次写事务结束，可推事件 */
-    if (!moreComing) {
-      /* HKSendNotifyMessage 签名依据 .a 导出符号推断，未从源码确认；
-         若编译/运行异常，注释掉本调用即可（读路径仍能反映状态）。 */
-      extern OSStatus HKSendNotifyMessage(int, int, int, value_union);
-      HKSendNotifyMessage(ACC_0, SVC_SWITCH, CHR_ON, value);
-    }
+    /* 注：原版用 HKSendNotifyMessage 推事件，但该符号签名未在 HomeKit.h 声明、
+       系据 .a 导出名推断，未实测；为避免隐式声明风险此处省略。读路径仍能反映状态，
+       只是 iOS 端需手动刷新。若需主动推送，待真机确认签名后再加回。 */
+    (void)moreComing;
   }
 }
 
