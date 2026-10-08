@@ -34,11 +34,13 @@ $(NAME)_SOURCES := main.c\
 				   timed_task/timed_task.c\
 				   http_server/web_log.c\
 				   http_server/app_httpd.c\
-				   telnet_server/user_telnet.c
+				   telnet_server/user_telnet.c\
+				   homekit_demo.c
 				   
 $(NAME)_COMPONENTS := protocols/SNTP\
 					protocols/mqtt\
 					utilities/url\
 					daemons/http_server\
-					daemons/ota_server
+					daemons/ota_server\
+					daemons/homekit_server
 					
