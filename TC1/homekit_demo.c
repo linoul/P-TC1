@@ -165,6 +165,17 @@ HkStatus HKExcuteUnpairedIdentityRoutine(void)
   return kHKNoErr;
 }
 
+/* ====================== 引导线程（由 main.c 创建） ======================
+ * hk_server_start 内部要绑定 socket，必须等 WiFi 真正连上再起。
+ * 线程里轮询 user_wifi 暴露的全局 wifi_status，连上后调 homekit_demo_start()。 */
+void homekit_boot_thread(void *arg)
+{
+  (void)arg;
+  while (wifi_status != WIFI_STATE_CONNECTED)
+    mico_rtos_thread_sleep(1);   /* 1 个 tick 轮询，连上即退出 */
+  homekit_demo_start();
+}
+
 /* ====================== 启动入口 ====================== */
 OSStatus homekit_demo_start(void)
 {
